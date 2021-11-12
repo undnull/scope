@@ -18,10 +18,13 @@
 #define STAGE_AFTER 1
 #define STAGE_FINAL 2
 
-#define SIGNAL_TAB_SIZE 1024
+/* This takes about 160 KiB of memory but I think
+ * that having a limit at about 22 kHz is worth it. */
+#define SIGNAL_TAB_SIZE 20480
 
-typedef float vec2_t[2];
-typedef float vec3_t[3];
+typedef double  vec2d_t[2];
+typedef float   vec2f_t[2];
+typedef float   vec3f_t[3];
 
 struct framebuffer {
     GLuint fbo;
@@ -29,79 +32,81 @@ struct framebuffer {
 };
 
 static GLuint programs[2] = { 0 };
-static GLuint valid_vao = 0;
+static GLuint valid_vao = 0, ssbo = 0;
 static struct framebuffer stage_fbos[3] = { 0 };
-static vec2_t signal_tab[SIGNAL_TAB_SIZE] = { 0 };
+static vec2f_t signal_tab[SIGNAL_TAB_SIZE] = { 0 };
 
 static const char *vert1_src =
-    "#version 450 core                                                      \n"
-    "#define SIGNAL_TAB_SIZE " TOSTRING2(SIGNAL_TAB_SIZE) "                 \n"
-    "uniform vec2 signal[SIGNAL_TAB_SIZE];                                  \n"
-    "void main(void)                                                        \n"
-    "{                                                                      \n"
-    "   uint index = SIGNAL_TAB_SIZE - 1 - gl_VertexID;                     \n"
-    "   gl_Position = vec4(signal[index] * 0.75, 0.0, 1.0);                 \n"
-    "}                                                                      \n";
+    "#version 450 core                                                          \n"
+    "#define SIGNAL_TAB_SIZE " TOSTRING2(SIGNAL_TAB_SIZE) "                     \n"
+    "layout(binding = 0, std430) buffer SIGNAL_TAB {                            \n"
+    "   vec2 signal[SIGNAL_TAB_SIZE];                                           \n"
+    "};                                                                         \n"
+    "void main(void)                                                            \n"
+    "{                                                                          \n"
+    "   uint index = SIGNAL_TAB_SIZE - 1 - gl_VertexID;                         \n"
+    "   gl_Position = vec4(signal[index] * 0.75, 0.0, 1.0);                     \n"
+    "}                                                                          \n";
 
 static const char *frag1_src =
-    "#version 450 core                                                      \n"
-    "uniform vec3 color;                                                    \n"
-    "layout(location = 0) out vec4 target;                                  \n"
-    "void main(void)                                                        \n"
-    "{                                                                      \n"
-    "   target = vec4(color, 1.0);                                          \n"
+    "#version 450 core                                                          \n"
+    "uniform vec3 color;                                                        \n"
+    "layout(location = 0) out vec4 target;                                      \n"
+    "void main(void)                                                            \n"
+    "{                                                                          \n"
+    "   target = vec4(color, 1.0);                                              \n"
     "}";
 
 static const char *vert2_src =
-    "#version 450 core                                                      \n"
-    "const vec2 positions[6] = {                                            \n"
-    "   vec2(-1.0, -1.0),                                                   \n"
-    "   vec2(-1.0,  1.0),                                                   \n"
-    "   vec2( 1.0,  1.0),                                                   \n"
-    "   vec2( 1.0,  1.0),                                                   \n"
-    "   vec2( 1.0, -1.0),                                                   \n"
-    "   vec2(-1.0, -1.0),                                                   \n"
-    "};                                                                     \n"
-    "const vec2 texcoords[6] = {                                            \n"
-    "   vec2(0.0, 0.0),                                                     \n"
-    "   vec2(0.0, 1.0),                                                     \n"
-    "   vec2(1.0, 1.0),                                                     \n"
-    "   vec2(1.0, 1.0),                                                     \n"
-    "   vec2(1.0, 0.0),                                                     \n"
-    "   vec2(0.0, 0.0),                                                     \n"
-    "};                                                                     \n"
-    "layout(location = 0) out vec2 texcoord;                                \n"
-    "void main(void)                                                        \n"
-    "{                                                                      \n"
-    "   gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);               \n"
-    "   texcoord = texcoords[gl_VertexID];                                  \n"
-    "}                                                                      \n";
+    "#version 450 core                                                          \n"
+    "const vec2 positions[6] = {                                                \n"
+    "   vec2(-1.0, -1.0),                                                       \n"
+    "   vec2(-1.0,  1.0),                                                       \n"
+    "   vec2( 1.0,  1.0),                                                       \n"
+    "   vec2( 1.0,  1.0),                                                       \n"
+    "   vec2( 1.0, -1.0),                                                       \n"
+    "   vec2(-1.0, -1.0),                                                       \n"
+    "};                                                                         \n"
+    "const vec2 texcoords[6] = {                                                \n"
+    "   vec2(0.0, 0.0),                                                         \n"
+    "   vec2(0.0, 1.0),                                                         \n"
+    "   vec2(1.0, 1.0),                                                         \n"
+    "   vec2(1.0, 1.0),                                                         \n"
+    "   vec2(1.0, 0.0),                                                         \n"
+    "   vec2(0.0, 0.0),                                                         \n"
+    "};                                                                         \n"
+    "layout(location = 0) out vec2 texcoord;                                    \n"
+    "void main(void)                                                            \n"
+    "{                                                                          \n"
+    "   gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);                   \n"
+    "   texcoord = texcoords[gl_VertexID];                                      \n"
+    "}                                                                          \n";
 
 static const char *frag2_src =
-    "#version 450 core                                                      \n"
-    "uniform float frametime;                                               \n"
-    "uniform ivec2 screen_size;                                             \n"
-    "layout(location = 0) in vec2 texcoord;                                 \n"
-    "layout(location = 0) out vec4 target;                                  \n"
-    "layout(binding = 0) uniform sampler2D curframe;                        \n"
-    "layout(binding = 1) uniform sampler2D afterburn;                       \n"
-    "vec4 textureHack(sampler2D s, vec2 b)                                  \n"
-    "{                                                                      \n"
-    "   vec2 epsilon = 2.0 / vec2(screen_size);                             \n"
-    "   vec4 res = vec4(0.0);                                               \n"
-    "   res += texture(s, b);                                               \n"
-    "   res += texture(s, b + vec2(epsilon.x, 0.0));                        \n"
-    "   res += texture(s, b - vec2(epsilon.x, 0.0));                        \n"
-    "   res += texture(s, b + vec2(0.0, epsilon.y));                        \n"
-    "   res += texture(s, b - vec2(0.0, epsilon.y));                        \n"
-    "   return res / 4.0;                                                   \n"
+    "#version 450 core                                                          \n"
+    "uniform float frametime;                                                   \n"
+    "uniform ivec2 screen_size;                                                 \n"
+    "layout(location = 0) in vec2 texcoord;                                     \n"
+    "layout(location = 0) out vec4 target;                                      \n"
+    "layout(binding = 0) uniform sampler2D curframe;                            \n"
+    "layout(binding = 1) uniform sampler2D afterburn;                           \n"
+    "vec4 textureSmooth(sampler2D s, vec2 b)                                    \n"
+    "{                                                                          \n"
+    "   vec2 epsilon = 2.0 / vec2(screen_size);                                 \n"
+    "   vec4 res = vec4(0.0);                                                   \n"
+    "   res += texture(s, b);                                                   \n"
+    "   res += texture(s, b + vec2(epsilon.x, 0.0));                            \n"
+    "   res += texture(s, b - vec2(epsilon.x, 0.0));                            \n"
+    "   res += texture(s, b + vec2(0.0, epsilon.y));                            \n"
+    "   res += texture(s, b - vec2(0.0, epsilon.y));                            \n"
+    "   return res / 5.0;                                                       \n"
     "}"
-    "void main(void)                                                        \n"
-    "{                                                                      \n"
-    "   vec4 cc = textureHack(curframe, texcoord);                          \n"
-    "   vec4 ac = texture(afterburn, texcoord) * (1.0 - frametime * 4.0);  \n"
-    "   target = max(cc, ac);                                               \n"
-    "}                                                                      \n";
+    "void main(void)                                                            \n"
+    "{                                                                          \n"
+    "   vec4 cc = texture(curframe, texcoord);                                  \n"
+    "   vec4 ac = textureSmooth(afterburn, texcoord) * (1.0 - frametime * 8.0); \n"
+    "   target = max(cc, ac);                                                   \n"
+    "}                                                                          \n";
 
 static void die(const char *fmt, ...)
 {
@@ -190,50 +195,49 @@ static GLuint make_program(GLuint vert, GLuint frag)
     return program;
 }
 
-#define PI      (3.14159265359f)
-#define RATE    (1.0f / 144.0f)
+#define PI      (3.14159265359)
+#define RATE    (1.0 / 144.0)
 
-static float make_shm(float a, float t, float f, float phase)
+static double make_shm(double a, double t, double f, double phase)
 {
-    return a * cosf(2 * PI * t * f + phase);
+    return a * cos(2 * PI * t * f + phase);
 }
 
-static float make_saw(float a, float t, float f, float phase)
+static double make_saw(double a, double t, double f, double phase)
 {
-    return a * (fmodf(t * 2.0f * f + phase, 2.0f) - 1.0f);
+    return a * (fmod(t * 2.0 * f + phase, 2.0) - 1.0);
 }
 
-static float make_tri(float a, float t, float f, float phase)
+static double make_tri(double a, double t, double f, double phase)
 {
-    return a * asinf(cosf(2 * PI * t * f + phase)) / (0.5f * PI);
+    return a * asin(cos(2 * PI * t * f + phase)) / (0.5 * PI);
 }
 
-static float make_signal_X(float curtime, float phase)
+static double make_signal_X(double curtime, double phase)
 {
-    return make_shm(1.0f, curtime, 5.0f, 0.0f);
+    return make_shm(1.0, curtime, 400.0, 0.0);
 }
 
-static float make_signal_Y(float curtime, float phase)
+static double make_signal_Y(double curtime, double phase)
 {
-    return make_shm(1.0f, curtime, 5.0f, phase);
+    return make_shm(1.0, curtime, 500.0, phase);
 }
 
 int main(int argc, char **argv)
 {
     int i;
-    float scratch;
+    double scratch;
     GLFWwindow *window = NULL;
     int width, height;
     GLuint vert, frag;
     GLuint fbos[3] = { 0 };
-    GLint u_signal = 0;
     GLint u_color = 0;
     GLint u_frametime = 0;
     GLint u_screen_size = 0;
     const char *glfw_error;
-    float curtime, pasttime, frametime, phase, aft;
-    vec2_t *signal_it;
-    const vec3_t dot_color = { 0.324f, 0.926f, 0.684f };
+    double curtime, pasttime, frametime, phase, aft;
+    vec2f_t *signal_it;
+    const vec3f_t dot_color = { 0.324f, 0.926f, 0.684f };
 
     if(!glfwInit()) {
         glfwGetError(&glfw_error);
@@ -262,7 +266,6 @@ int main(int argc, char **argv)
     assert((programs[PROG_MAIN], "PROG_MAIN link failed"));
 
     /* PROG_MAIN uniforms */
-    u_signal = glGetUniformLocation(programs[PROG_MAIN], "signal");
     u_color = glGetUniformLocation(programs[PROG_MAIN], "color");
 
     vert = make_shader(GL_VERTEX_SHADER, vert2_src);
@@ -281,6 +284,9 @@ int main(int argc, char **argv)
      * manually or have them hardcoded. */
     glCreateVertexArrays(1, &valid_vao);
 
+    glCreateBuffers(1, &ssbo);
+    glNamedBufferStorage(ssbo, sizeof(signal_tab), NULL, GL_DYNAMIC_STORAGE_BIT);
+
     glCreateFramebuffers(3, fbos);
     for(i = 0; i < 3; i++)
         stage_fbos[i].fbo = fbos[i];
@@ -289,24 +295,23 @@ int main(int argc, char **argv)
     glfwSetFramebufferSizeCallback(window, &on_framebuffer_size);
     on_framebuffer_size(window, width, height);
 
-    pasttime = curtime = (float)glfwGetTime();
+    pasttime = curtime = glfwGetTime();
     phase = aft = 0.0f;
     while(!glfwWindowShouldClose(window)) {
-        curtime = (float)glfwGetTime();
+        curtime = glfwGetTime();
         frametime = curtime - pasttime;
+        pasttime = curtime;
         phase += frametime;
 
         aft += frametime;
         aft *= 0.5f;
 
         for(i = 0; i < SIGNAL_TAB_SIZE; i++) {
-            scratch = ((float)i / (float)SIGNAL_TAB_SIZE) * ((frametime < RATE) ? RATE : frametime);
+            scratch = ((double)i / (double)SIGNAL_TAB_SIZE) * ((aft < RATE) ? RATE : aft);
             signal_it = signal_tab + i;
-            (*signal_it)[0] = make_signal_X(pasttime + scratch, phase);
-            (*signal_it)[1] = make_signal_Y(pasttime + scratch, phase);
+            (*signal_it)[0] = (float)make_signal_X(curtime + scratch, phase + scratch);
+            (*signal_it)[1] = (float)make_signal_Y(curtime + scratch, phase + scratch);
         }
-
-        pasttime = curtime;
 
         glfwGetFramebufferSize(window, &width, &height);
         glViewport(0, 0, width, height);
@@ -316,15 +321,16 @@ int main(int argc, char **argv)
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_POINT].fbo);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+        glNamedBufferSubData(ssbo, 0, sizeof(signal_tab), signal_tab);
+        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
         glUseProgram(programs[PROG_MAIN]);
-        glProgramUniform2fv(programs[PROG_MAIN], u_signal, SIGNAL_TAB_SIZE, (const float *)signal_tab);
         glProgramUniform3fv(programs[PROG_MAIN], u_color, 1, dot_color);
-        glLineWidth(4.0f);
+        glLineWidth(2.0f);
         glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_FINAL].fbo);
         glUseProgram(programs[PROG_BLIT]);
-        glProgramUniform1f(programs[PROG_BLIT], u_frametime, frametime);
+        glProgramUniform1f(programs[PROG_BLIT], u_frametime, (float)frametime);
         glProgramUniform2i(programs[PROG_BLIT], u_screen_size, width, height);
         glBindTextureUnit(0, stage_fbos[STAGE_POINT].tex);
         glBindTextureUnit(1, stage_fbos[STAGE_AFTER].tex);
@@ -339,7 +345,23 @@ int main(int argc, char **argv)
         glfwPollEvents();
     }
 
+    for(i = 0; i < 3; i++)
+        fbos[i] = stage_fbos[i].fbo;
+    glDeleteFramebuffers(3, fbos);
 
+    /* hack */
+    for(i = 0; i < 3; i++)
+        fbos[i] = stage_fbos[i].tex;
+    glDeleteTextures(3, fbos);
+
+    glDeleteBuffers(1, &ssbo);
+    glDeleteVertexArrays(1, &valid_vao);
+
+    glDeleteProgram(programs[PROG_BLIT]);
+    glDeleteProgram(programs[PROG_MAIN]);
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
 
     return 0;
 }
