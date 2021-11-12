@@ -90,12 +90,11 @@ static const char *frag2_src =
     "layout(location = 0) out vec4 target;                                          \n"
     "layout(binding = 0) uniform sampler2D curframe;                                \n"
     "layout(binding = 1) uniform sampler2D afterburn;                               \n"
-    "vec4 textureSmooth(sampler2D s, vec2 b, int n)                                 \n"
+    "vec4 textureSmooth(sampler2D s, vec2 b)                                        \n"
     "{                                                                              \n"
     "   vec2 epsilon = 2.0 / vec2(screen_size);                                     \n"
     "   vec4 res = vec4(0.0);                                                       \n"
-    "   for(int i = 0; i < n; i++)                                                  \n"
-    "       res += texture(s, b);                                                   \n"
+    "   res += texture(s, b);                                                       \n"
     "   res += texture(s, b + vec2(epsilon.x, 0.0));                                \n"
     "   res += texture(s, b - vec2(epsilon.x, 0.0));                                \n"
     "   res += texture(s, b + vec2(0.0, epsilon.y));                                \n"
@@ -104,8 +103,8 @@ static const char *frag2_src =
     "}                                                                              \n"
     "void main(void)                                                                \n"
     "{                                                                              \n"
-    "   vec4 cc = textureSmooth(curframe, texcoord, 3);                             \n"
-    "   vec4 ac = textureSmooth(afterburn, texcoord, 1) * (1.0 - frametime * 16.0); \n"
+    "   vec4 cc = texture(curframe, texcoord);                                      \n"
+    "   vec4 ac = textureSmooth(afterburn, texcoord) * (1.0 - frametime * 4.0);     \n"
     "   target = max(cc, ac);                                                       \n"
     "}                                                                              \n";
 
@@ -216,12 +215,12 @@ static double make_tri(double a, double t, double f, double phase)
 
 static double make_signal_X(double curtime, double phase)
 {
-    return make_saw(1.0, curtime, 50.0, 0.0);
+    return make_shm(1.0, curtime, 5.0, 0.0);
 }
 
 static double make_signal_Y(double curtime, double phase)
 {
-    return make_shm(0.5, curtime, 150.0, phase);
+    return make_shm(1.0, curtime, 5.0, phase);
 }
 
 int main(int argc, char **argv)
@@ -258,7 +257,7 @@ int main(int argc, char **argv)
     glfwMakeContextCurrent(window);
     if(!gladLoadGL((GLADloadfunc)(&glfwGetProcAddress)))
         die("gladLoadGL failed\n");
-    glfwSwapInterval(0);
+    glfwSwapInterval(1);
 
     vert = make_shader(GL_VERTEX_SHADER, vert1_src);
     frag = make_shader(GL_FRAGMENT_SHADER, frag1_src);
@@ -325,8 +324,8 @@ int main(int argc, char **argv)
         glUseProgram(programs[PROG_MAIN]);
         glProgramUniform3fv(programs[PROG_MAIN], u_color, 1, dot_color);
         glLineWidth(4.0f);
-        glPointSize(4.0);
-        glDrawArrays(GL_POINTS, 0, 1);
+        glPointSize(4.0f);
+        glDrawArrays(GL_POINTS, 0, 16);
         glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_FINAL].fbo);
