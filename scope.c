@@ -104,7 +104,7 @@ static const char *frag2_src =
     "void main(void)                                                                \n"
     "{                                                                              \n"
     "   vec4 cc = texture(curframe, texcoord);                                      \n"
-    "   vec4 ac = textureSmooth(afterburn, texcoord) * (1.0 - frametime * 4.0);     \n"
+    "   vec4 ac = textureSmooth(afterburn, texcoord) * (1.0 - frametime * 16.0);    \n"
     "   target = max(cc, ac);                                                       \n"
     "}                                                                              \n";
 
@@ -215,12 +215,12 @@ static double make_tri(double a, double t, double f, double phase)
 
 static double make_signal_X(double curtime, double phase)
 {
-    return make_shm(1.0, curtime, 5.0, 0.0);
+    return make_saw(1.0, curtime, 120.0, 0.0);
 }
 
 static double make_signal_Y(double curtime, double phase)
 {
-    return make_shm(1.0, curtime, 5.0, phase);
+    return make_shm(1.0, curtime, 120.0, phase);
 }
 
 int main(int argc, char **argv)
