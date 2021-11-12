@@ -37,76 +37,77 @@ static struct framebuffer stage_fbos[3] = { 0 };
 static vec2f_t signal_tab[SIGNAL_TAB_SIZE] = { 0 };
 
 static const char *vert1_src =
-    "#version 450 core                                                          \n"
-    "#define SIGNAL_TAB_SIZE " TOSTRING2(SIGNAL_TAB_SIZE) "                     \n"
-    "layout(binding = 0, std430) buffer SIGNAL_TAB {                            \n"
-    "   vec2 signal[SIGNAL_TAB_SIZE];                                           \n"
-    "};                                                                         \n"
-    "void main(void)                                                            \n"
-    "{                                                                          \n"
-    "   uint index = SIGNAL_TAB_SIZE - 1 - gl_VertexID;                         \n"
-    "   gl_Position = vec4(signal[index] * 0.75, 0.0, 1.0);                     \n"
-    "}                                                                          \n";
+    "#version 450 core                                                              \n"
+    "#define SIGNAL_TAB_SIZE " TOSTRING2(SIGNAL_TAB_SIZE) "                         \n"
+    "layout(binding = 0, std430) buffer SIGNAL_TAB {                                \n"
+    "   vec2 signal[SIGNAL_TAB_SIZE];                                               \n"
+    "};                                                                             \n"
+    "void main(void)                                                                \n"
+    "{                                                                              \n"
+    "   uint index = SIGNAL_TAB_SIZE - 1 - gl_VertexID;                             \n"
+    "   gl_Position = vec4(signal[index] * 0.90, 0.0, 1.0);                         \n"
+    "}                                                                              \n";
 
 static const char *frag1_src =
-    "#version 450 core                                                          \n"
-    "uniform vec3 color;                                                        \n"
-    "layout(location = 0) out vec4 target;                                      \n"
-    "void main(void)                                                            \n"
-    "{                                                                          \n"
-    "   target = vec4(color, 1.0);                                              \n"
+    "#version 450 core                                                              \n"
+    "uniform vec3 color;                                                            \n"
+    "layout(location = 0) out vec4 target;                                          \n"
+    "void main(void)                                                                \n"
+    "{                                                                              \n"
+    "   target = vec4(color, 1.0);                                                  \n"
     "}";
 
 static const char *vert2_src =
-    "#version 450 core                                                          \n"
-    "const vec2 positions[6] = {                                                \n"
-    "   vec2(-1.0, -1.0),                                                       \n"
-    "   vec2(-1.0,  1.0),                                                       \n"
-    "   vec2( 1.0,  1.0),                                                       \n"
-    "   vec2( 1.0,  1.0),                                                       \n"
-    "   vec2( 1.0, -1.0),                                                       \n"
-    "   vec2(-1.0, -1.0),                                                       \n"
-    "};                                                                         \n"
-    "const vec2 texcoords[6] = {                                                \n"
-    "   vec2(0.0, 0.0),                                                         \n"
-    "   vec2(0.0, 1.0),                                                         \n"
-    "   vec2(1.0, 1.0),                                                         \n"
-    "   vec2(1.0, 1.0),                                                         \n"
-    "   vec2(1.0, 0.0),                                                         \n"
-    "   vec2(0.0, 0.0),                                                         \n"
-    "};                                                                         \n"
-    "layout(location = 0) out vec2 texcoord;                                    \n"
-    "void main(void)                                                            \n"
-    "{                                                                          \n"
-    "   gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);                   \n"
-    "   texcoord = texcoords[gl_VertexID];                                      \n"
-    "}                                                                          \n";
+    "#version 450 core                                                              \n"
+    "const vec2 positions[6] = {                                                    \n"
+    "   vec2(-1.0, -1.0),                                                           \n"
+    "   vec2(-1.0,  1.0),                                                           \n"
+    "   vec2( 1.0,  1.0),                                                           \n"
+    "   vec2( 1.0,  1.0),                                                           \n"
+    "   vec2( 1.0, -1.0),                                                           \n"
+    "   vec2(-1.0, -1.0),                                                           \n"
+    "};                                                                             \n"
+    "const vec2 texcoords[6] = {                                                    \n"
+    "   vec2(0.0, 0.0),                                                             \n"
+    "   vec2(0.0, 1.0),                                                             \n"
+    "   vec2(1.0, 1.0),                                                             \n"
+    "   vec2(1.0, 1.0),                                                             \n"
+    "   vec2(1.0, 0.0),                                                             \n"
+    "   vec2(0.0, 0.0),                                                             \n"
+    "};                                                                             \n"
+    "layout(location = 0) out vec2 texcoord;                                        \n"
+    "void main(void)                                                                \n"
+    "{                                                                              \n"
+    "   gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);                       \n"
+    "   texcoord = texcoords[gl_VertexID];                                          \n"
+    "}                                                                              \n";
 
 static const char *frag2_src =
-    "#version 450 core                                                          \n"
-    "uniform float frametime;                                                   \n"
-    "uniform ivec2 screen_size;                                                 \n"
-    "layout(location = 0) in vec2 texcoord;                                     \n"
-    "layout(location = 0) out vec4 target;                                      \n"
-    "layout(binding = 0) uniform sampler2D curframe;                            \n"
-    "layout(binding = 1) uniform sampler2D afterburn;                           \n"
-    "vec4 textureSmooth(sampler2D s, vec2 b)                                    \n"
-    "{                                                                          \n"
-    "   vec2 epsilon = 2.0 / vec2(screen_size);                                 \n"
-    "   vec4 res = vec4(0.0);                                                   \n"
-    "   res += texture(s, b);                                                   \n"
-    "   res += texture(s, b + vec2(epsilon.x, 0.0));                            \n"
-    "   res += texture(s, b - vec2(epsilon.x, 0.0));                            \n"
-    "   res += texture(s, b + vec2(0.0, epsilon.y));                            \n"
-    "   res += texture(s, b - vec2(0.0, epsilon.y));                            \n"
-    "   return res / 5.0;                                                       \n"
-    "}"
-    "void main(void)                                                            \n"
-    "{                                                                          \n"
-    "   vec4 cc = texture(curframe, texcoord);                                  \n"
-    "   vec4 ac = textureSmooth(afterburn, texcoord) * (1.0 - frametime * 8.0); \n"
-    "   target = max(cc, ac);                                                   \n"
-    "}                                                                          \n";
+    "#version 450 core                                                              \n"
+    "uniform float frametime;                                                       \n"
+    "uniform ivec2 screen_size;                                                     \n"
+    "layout(location = 0) in vec2 texcoord;                                         \n"
+    "layout(location = 0) out vec4 target;                                          \n"
+    "layout(binding = 0) uniform sampler2D curframe;                                \n"
+    "layout(binding = 1) uniform sampler2D afterburn;                               \n"
+    "vec4 textureSmooth(sampler2D s, vec2 b, int n)                                 \n"
+    "{                                                                              \n"
+    "   vec2 epsilon = 2.0 / vec2(screen_size);                                     \n"
+    "   vec4 res = vec4(0.0);                                                       \n"
+    "   for(int i = 0; i < n; i++)                                                  \n"
+    "       res += texture(s, b);                                                   \n"
+    "   res += texture(s, b + vec2(epsilon.x, 0.0));                                \n"
+    "   res += texture(s, b - vec2(epsilon.x, 0.0));                                \n"
+    "   res += texture(s, b + vec2(0.0, epsilon.y));                                \n"
+    "   res += texture(s, b - vec2(0.0, epsilon.y));                                \n"
+    "   return res / 5.0;                                                           \n"
+    "}                                                                              \n"
+    "void main(void)                                                                \n"
+    "{                                                                              \n"
+    "   vec4 cc = textureSmooth(curframe, texcoord, 3);                             \n"
+    "   vec4 ac = textureSmooth(afterburn, texcoord, 1) * (1.0 - frametime * 16.0); \n"
+    "   target = max(cc, ac);                                                       \n"
+    "}                                                                              \n";
 
 static void die(const char *fmt, ...)
 {
@@ -215,12 +216,12 @@ static double make_tri(double a, double t, double f, double phase)
 
 static double make_signal_X(double curtime, double phase)
 {
-    return make_shm(1.0, curtime, 400.0, 0.0);
+    return make_saw(1.0, curtime, 50.0, 0.0);
 }
 
 static double make_signal_Y(double curtime, double phase)
 {
-    return make_shm(1.0, curtime, 500.0, phase);
+    return make_shm(0.5, curtime, 150.0, phase);
 }
 
 int main(int argc, char **argv)
@@ -301,10 +302,8 @@ int main(int argc, char **argv)
         curtime = glfwGetTime();
         frametime = curtime - pasttime;
         pasttime = curtime;
-        phase += frametime;
-
-        aft += frametime;
-        aft *= 0.5f;
+        phase = fmod(phase + frametime, 2.0 * PI);
+        aft = (aft + frametime) * 0.5;
 
         for(i = 0; i < SIGNAL_TAB_SIZE; i++) {
             scratch = ((double)i / (double)SIGNAL_TAB_SIZE) * ((aft < RATE) ? RATE : aft);
@@ -325,7 +324,9 @@ int main(int argc, char **argv)
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, ssbo);
         glUseProgram(programs[PROG_MAIN]);
         glProgramUniform3fv(programs[PROG_MAIN], u_color, 1, dot_color);
-        glLineWidth(2.0f);
+        glLineWidth(4.0f);
+        glPointSize(4.0);
+        glDrawArrays(GL_POINTS, 0, 1);
         glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_FINAL].fbo);
