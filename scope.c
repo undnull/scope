@@ -274,29 +274,29 @@ static GLuint make_program(GLuint vert, GLuint frag)
     return program;
 }
 
-static double make_shm(double a, double t, double f, double phase)
+static double make_shm(double a, double t, double f, double ts)
 {
-    return a * cos(2 * M_PI * t * f + phase);
+    return a * cos(2 * M_PI * t * f + ts);
 }
 
-static double make_saw(double a, double t, double f, double phase)
+static double make_saw(double a, double t, double f, double ts)
 {
-    return a * (fmod(t * 2.0 * f + phase, 2.0) - 1.0);
+    return a * (fmod(t * 2.0 * f + ts, 2.0) - 1.0);
 }
 
-static double make_tri(double a, double t, double f, double phase)
+static double make_tri(double a, double t, double f, double ts)
 {
-    return a * asin(cos(2 * M_PI * t * f + phase)) / (0.5 * M_PI);
+    return a * asin(cos(2 * M_PI * t * f + ts)) / (0.5 * M_PI);
 }
 
-static double make_signal_X(double curtime, double shift)
+static double make_signal_X(double curtime, double ts)
 {
-    return make_shm(1.0, curtime, 11000.0, 0.0);
+    return make_saw(1.0, curtime, 128.0, 0.0);
 }
 
-static double make_signal_Y(double curtime, double shift)
+static double make_signal_Y(double curtime, double ts)
 {
-    return make_shm(1.0, curtime, 12000.0, shift);
+    return make_shm(1.0, curtime, 256.0, ts);
 }
 
 int main(int argc, char **argv)
@@ -413,8 +413,8 @@ int main(int argc, char **argv)
         glBindFramebuffer(GL_FRAMEBUFFER, g_fbos_obj[FBO_BEAM]);
         glClearColor(g_background[0], g_background[1], g_background[2], 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
-        glLineWidth(4.0);
-        glPointSize(4.0);
+        glLineWidth(3.0);
+        glPointSize(3.0);
         glUseProgram(g_progs[PROG_BEAM]);
         glDrawArrays(GL_POINTS, 0, 1);
         glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
