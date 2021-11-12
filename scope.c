@@ -291,12 +291,12 @@ static double make_tri(double a, double t, double f, double phase)
 
 static double make_signal_X(double curtime, double shift)
 {
-    return make_shm(1.0, curtime, 10.0, 0.0);
+    return make_shm(1.0, curtime, 11000.0, 0.0);
 }
 
 static double make_signal_Y(double curtime, double shift)
 {
-    return make_shm(1.0, curtime, 30.0, shift);
+    return make_shm(1.0, curtime, 12000.0, shift);
 }
 
 int main(int argc, char **argv)
