@@ -18,9 +18,10 @@
 #define STAGE_AFTER 1
 #define STAGE_FINAL 2
 
-#define SIGNAL_TAB_SIZE 512
+#define SIGNAL_TAB_SIZE 1024
 
 typedef float vec2_t[2];
+typedef float vec3_t[3];
 
 struct framebuffer {
     GLuint fbo;
@@ -79,15 +80,27 @@ static const char *vert2_src =
 static const char *frag2_src =
     "#version 450 core                                                      \n"
     "uniform float frametime;                                               \n"
+    "uniform ivec2 screen_size;                                             \n"
     "layout(location = 0) in vec2 texcoord;                                 \n"
     "layout(location = 0) out vec4 target;                                  \n"
     "layout(binding = 0) uniform sampler2D curframe;                        \n"
     "layout(binding = 1) uniform sampler2D afterburn;                       \n"
+    "vec4 textureHack(sampler2D s, vec2 b)                                  \n"
+    "{                                                                      \n"
+    "   vec2 epsilon = 2.0 / vec2(screen_size);                             \n"
+    "   vec4 res = vec4(0.0);                                               \n"
+    "   res += texture(s, b);                                               \n"
+    "   res += texture(s, b + vec2(epsilon.x, 0.0));                        \n"
+    "   res += texture(s, b - vec2(epsilon.x, 0.0));                        \n"
+    "   res += texture(s, b + vec2(0.0, epsilon.y));                        \n"
+    "   res += texture(s, b - vec2(0.0, epsilon.y));                        \n"
+    "   return res / 4.0;                                                   \n"
+    "}"
     "void main(void)                                                        \n"
     "{                                                                      \n"
-    "   vec4 cc = texture(curframe, texcoord);                              \n"
-    "   vec4 ac = texture(afterburn, texcoord) * (1.0 - frametime * 16.0);  \n"
-    "   target = cc + ac;                                                   \n"
+    "   vec4 cc = textureHack(curframe, texcoord);                          \n"
+    "   vec4 ac = texture(afterburn, texcoord) * (1.0 - frametime * 4.0);  \n"
+    "   target = max(cc, ac);                                               \n"
     "}                                                                      \n";
 
 static void die(const char *fmt, ...)
@@ -105,15 +118,12 @@ static void on_framebuffer_size(GLFWwindow *window, int w, int h)
     GLuint textures[3] = { stage_fbos[0].tex, stage_fbos[1].tex, stage_fbos[2].tex };
     (void)window;
 
-    w /= 2;
-    h /= 2;
-
     glDeleteTextures(3, textures);
     glCreateTextures(GL_TEXTURE_2D, 3, textures);
     for(i = 0; i < 3; i++) {
-        glTextureStorage2D(textures[i], 1, GL_RGBA16F, w, h);
-        glTextureParameterf(textures[i], GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTextureParameterf(textures[i], GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTextureStorage2D(textures[i], 1, GL_RGB32F, w, h);
+        glTextureParameteri(textures[i], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTextureParameteri(textures[i], GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glNamedFramebufferTexture(stage_fbos[i].fbo, GL_COLOR_ATTACHMENT0, textures[i], 0);
         stage_fbos[i].tex = textures[i];
     }
@@ -180,22 +190,32 @@ static GLuint make_program(GLuint vert, GLuint frag)
     return program;
 }
 
-#define PI 3.14159265359f
+#define PI      (3.14159265359f)
+#define RATE    (1.0f / 144.0f)
+
+static float make_shm(float a, float t, float f, float phase)
+{
+    return a * cosf(2 * PI * t * f + phase);
+}
+
+static float make_saw(float a, float t, float f, float phase)
+{
+    return a * (fmodf(t * 2.0f * f + phase, 2.0f) - 1.0f);
+}
+
+static float make_tri(float a, float t, float f, float phase)
+{
+    return a * asinf(cosf(2 * PI * t * f + phase)) / (0.5f * PI);
+}
 
 static float make_signal_X(float curtime, float phase)
 {
-    return cosf(2.0f * PI * curtime * 5.0f);
+    return make_shm(1.0f, curtime, 5.0f, 0.0f);
 }
 
 static float make_signal_Y(float curtime, float phase)
 {
-    return cosf(2.0f * PI * curtime * 5.0f + phase);
-}
-
-static void push_signal(const vec2_t sig)
-{
-    memmove(signal_tab, signal_tab + 1, sizeof(signal_tab));
-    memcpy(signal_tab + SIGNAL_TAB_SIZE - 1, sig, sizeof(vec2_t));
+    return make_shm(1.0f, curtime, 5.0f, phase);
 }
 
 int main(int argc, char **argv)
@@ -203,26 +223,29 @@ int main(int argc, char **argv)
     int i;
     float scratch;
     GLFWwindow *window = NULL;
-    int width, height, hw, hh;
+    int width, height;
     GLuint vert, frag;
     GLuint fbos[3] = { 0 };
     GLint u_signal = 0;
     GLint u_color = 0;
     GLint u_frametime = 0;
+    GLint u_screen_size = 0;
     const char *glfw_error;
-    float curtime, pasttime, frametime, phase, swap;
+    float curtime, pasttime, frametime, phase, aft;
     vec2_t *signal_it;
+    const vec3_t dot_color = { 0.324f, 0.926f, 0.684f };
 
     if(!glfwInit()) {
         glfwGetError(&glfw_error);
         die("GLFW: %s\n", glfw_error);
     }
 
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-    if(!(window = glfwCreateWindow(640, 480, "scope", NULL, NULL))) {
+    if(!(window = glfwCreateWindow(640, 640, "scope", NULL, NULL))) {
         glfwGetError(&glfw_error);
         die("GLFW: %s\n", glfw_error);
     }
@@ -230,7 +253,7 @@ int main(int argc, char **argv)
     glfwMakeContextCurrent(window);
     if(!gladLoadGL((GLADloadfunc)(&glfwGetProcAddress)))
         die("gladLoadGL failed\n");
-    glfwSwapInterval(1);
+    glfwSwapInterval(0);
 
     vert = make_shader(GL_VERTEX_SHADER, vert1_src);
     frag = make_shader(GL_FRAGMENT_SHADER, frag1_src);
@@ -250,6 +273,7 @@ int main(int argc, char **argv)
 
     /* PROG_BLIT uniforms */
     u_frametime = glGetUniformLocation(programs[PROG_BLIT], "frametime");
+    u_screen_size = glGetUniformLocation(programs[PROG_BLIT], "screen_size");
 
     /* To draw stuff OpenGL needs a valid VAO
      * bound to the state. We don't need any
@@ -266,48 +290,48 @@ int main(int argc, char **argv)
     on_framebuffer_size(window, width, height);
 
     pasttime = curtime = (float)glfwGetTime();
-    phase = swap = 0.0f;
+    phase = aft = 0.0f;
     while(!glfwWindowShouldClose(window)) {
         curtime = (float)glfwGetTime();
         frametime = curtime - pasttime;
-        pasttime = curtime;
-        swap += frametime;
         phase += frametime;
 
+        aft += frametime;
+        aft *= 0.5f;
+
         for(i = 0; i < SIGNAL_TAB_SIZE; i++) {
-            scratch = ((float)(i + 1) / (float)SIGNAL_TAB_SIZE) * frametime;
+            scratch = ((float)i / (float)SIGNAL_TAB_SIZE) * ((frametime < RATE) ? RATE : frametime);
             signal_it = signal_tab + i;
             (*signal_it)[0] = make_signal_X(pasttime + scratch, phase);
             (*signal_it)[1] = make_signal_Y(pasttime + scratch, phase);
         }
 
+        pasttime = curtime;
+
         glfwGetFramebufferSize(window, &width, &height);
-        hw = width / 2;
-        hh = height / 2;
+        glViewport(0, 0, width, height);
 
         glBindVertexArray(valid_vao);
-
-        glViewport(0, 0, hw, hh);
 
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_POINT].fbo);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         glUseProgram(programs[PROG_MAIN]);
         glProgramUniform2fv(programs[PROG_MAIN], u_signal, SIGNAL_TAB_SIZE, (const float *)signal_tab);
-        glProgramUniform3f(programs[PROG_MAIN], u_color, 0.0f, 1.0f, 0.0f);
+        glProgramUniform3fv(programs[PROG_MAIN], u_color, 1, dot_color);
+        glLineWidth(4.0f);
         glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, stage_fbos[STAGE_FINAL].fbo);
         glUseProgram(programs[PROG_BLIT]);
         glProgramUniform1f(programs[PROG_BLIT], u_frametime, frametime);
+        glProgramUniform2i(programs[PROG_BLIT], u_screen_size, width, height);
         glBindTextureUnit(0, stage_fbos[STAGE_POINT].tex);
         glBindTextureUnit(1, stage_fbos[STAGE_AFTER].tex);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        glBlitNamedFramebuffer(stage_fbos[STAGE_FINAL].fbo, 0, 0, 0, hw, hh, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-        glBlitNamedFramebuffer(stage_fbos[STAGE_FINAL].fbo, stage_fbos[STAGE_AFTER].fbo, 0, 0, hw, hh, 0, 0, hw, hh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-
-        glViewport(0, 0, width, height);
+        glBlitNamedFramebuffer(stage_fbos[STAGE_FINAL].fbo, 0, 0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBlitNamedFramebuffer(stage_fbos[STAGE_FINAL].fbo, stage_fbos[STAGE_AFTER].fbo, 0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
