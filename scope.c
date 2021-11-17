@@ -1,39 +1,25 @@
 #define _USE_MATH_DEFINES 1
+#define DR_WAV_IMPLEMENTATION 1
 
 #include <assert.h>
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <math.h>
+#include <portaudio.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dr_wav.h"
+
 #define TOSTRING1(x) #x
 #define TOSTRING2(x) TOSTRING1(x)
 
-#define PROG_BEAM 0 /* Signal table (electron beam) */
-#define PROG_POST 1 /* Afterimage of the beam       */
-#define PROG_GRID 2 /* Oscilloscope's graticule     */
-#define NUM_PROGS 3
-
-#define FBO_BEAM 0  /* Actual beam (and occasionally line) image    */
-#define FBO_POST 1  /* Afterimage of the beam                       */
-#define FBO_COPY 2  /* COPY -> main_fbo and COPY -> POST            */
-#define NUM_FBOS 3
-
-#define BUF_SSBO 0 /* SSBO  - signal data */
-#define BUF_UNIF 1 /* UBO   - common data */
+#define BUF_SSBO 0 /* SSBO  - wave data     */
+#define BUF_UNIF 1 /* UBO   - common data   */
 #define NUM_BUFS 2
-
-#define NDC_MARGIN 0.1
-
-/* This takes about 320 KiB of memory but I think
- * that having a limit at about 22 kHz is worth it. */
-#define SIGNAL_TAB_SIZE 40960
-
-#define MAX_SAMPLE_DT (1.0 / 144.0)
 
 typedef double  vec2d_t[2];
 typedef float   vec2f_t[2];
@@ -45,130 +31,43 @@ struct ubo_data {
     vec4f_t x_dt_yz_screen;
 };
 
+struct pa_state {
+    size_t sample_rate;
+    size_t num_samples;
+    size_t num_channels;
+    size_t position;
+    float *samples;
+};
+
 static char g_logbuf[4096] = { 0 };
+static PaStream *g_stream = NULL;
 static GLFWwindow *g_window = NULL;
-static GLuint g_progs[NUM_PROGS] = { 0 };
-static GLuint g_fbos_obj[NUM_FBOS] = { 0 };
-static GLuint g_fbos_tex[NUM_FBOS] = { 0 };
+static GLuint g_program = 0;
 static GLuint g_bufs[NUM_BUFS] = { 0 };
 static GLuint g_vao = 0;
-static vec2f_t g_signal[SIGNAL_TAB_SIZE] = { 0 };
+static struct pa_state g_state = { 0 };
+static vec2f_t *g_wave_table = NULL;
+static size_t g_wave_table_size = 0;
 
-static const vec3f_t g_background = { 0.192f, 0.243f, 0.270f };
-static const vec3f_t g_foreground = { 0.670f, 0.827f, 0.905f };
+static const char *vert_src =
+    "#version 450 core                                                  \n"
+    "layout(binding = 0, std430) buffer __ssbo_0 { vec2 signal[]; };    \n"
+    "void main(void)                                                    \n"
+    "{                                                                  \n"
+    "   gl_Position = vec4(signal[gl_VertexID], 0.0, 1.0);              \n"
+    "}                                                                  \n";
 
-/* PROG_BEAM vertex shader.
- * Responsible for translating the long
- * LINE_STRIP or POINTS snake of the signal table. */
-static const char *beam_vert_src =
-    "#version 450 core                                                                      \n"
-    "#define SIGNAL_TAB_SIZE " TOSTRING2(SIGNAL_TAB_SIZE) "                                 \n"
-    "#define NDC_MARGIN " TOSTRING2(NDC_MARGIN) "                                           \n"
-    "layout(binding = 0, std430) buffer __ssbo_0 { vec2 signal[SIGNAL_TAB_SIZE]; };         \n"
-    "void main(void)                                                                        \n"
-    "{                                                                                      \n"
-    "   uint index = SIGNAL_TAB_SIZE - 1 - gl_VertexID;                                     \n"
-    "   gl_Position = vec4(signal[index] * (1.0 - NDC_MARGIN), 0.0, 1.0);                   \n"
-    "}                                                                                      \n";
-
-/* PROG_BEAM fragment shader.
- * Responsible for displaying the long
- * LINE_STRIP or POINTS snake of the signal table. */
-static const char *beam_frag_src =
-    "#version 450 core                                                                      \n"
-    "layout(binding = 1, std140) uniform __ubo_1 {                                          \n"
-    "   vec4 xyz_color;                                                                     \n"
-    "   vec4 x_dt_yz_screen;                                                                \n"
-    "};                                                                                     \n"
-    "layout(location = 0) out vec4 target;                                                  \n"
-    "void main(void)                                                                        \n"
-    "{                                                                                      \n"
-    "   target = vec4(xyz_color.xyz, 1.0);                                                  \n"
+static const char *frag_src =
+    "#version 450 core                                                  \n"
+    "layout(binding = 1, std140) uniform __ubo_1 {                      \n"
+    "   vec4 xyz_color;                                                 \n"
+    "   vec4 x_dt_yz_screen;                                            \n"
+    "};                                                                 \n"
+    "layout(location = 0) out vec4 target;                              \n"
+    "void main(void)                                                    \n"
+    "{                                                                  \n"
+    "   target = vec4(xyz_color.xyz, 1.0);                              \n"
     "}";
-
-/* PROG_POST and PROG_GRID vertex shader.
- * Just draws a full screen-space quad. */
-static const char *post_grid_vert_src =
-    "#version 450 core                                                                      \n"
-    "const vec2 positions[6] = {                                                            \n"
-    "   vec2(-1.0, -1.0),                                                                   \n"
-    "   vec2(-1.0,  1.0),                                                                   \n"
-    "   vec2( 1.0,  1.0),                                                                   \n"
-    "   vec2( 1.0,  1.0),                                                                   \n"
-    "   vec2( 1.0, -1.0),                                                                   \n"
-    "   vec2(-1.0, -1.0),                                                                   \n"
-    "};                                                                                     \n"
-    "const vec2 texcoords[6] = {                                                            \n"
-    "   vec2(0.0, 0.0),                                                                     \n"
-    "   vec2(0.0, 1.0),                                                                     \n"
-    "   vec2(1.0, 1.0),                                                                     \n"
-    "   vec2(1.0, 1.0),                                                                     \n"
-    "   vec2(1.0, 0.0),                                                                     \n"
-    "   vec2(0.0, 0.0),                                                                     \n"
-    "};                                                                                     \n"
-    "layout(location = 0) out vec2 texcoord;                                                \n"
-    "void main(void)                                                                        \n"
-    "{                                                                                      \n"
-    "   gl_Position = vec4(positions[gl_VertexID], 0.0, 1.0);                               \n"
-    "   texcoord = texcoords[gl_VertexID];                                                  \n"
-    "}                                                                                      \n";
-
-/* PROG_POST fragment shader.
- * Combines the beam image and the afterimage. */
-static const char *post_frag_src =
-    "#version 450 core                                                                      \n"
-    "layout(binding = 1, std140) uniform __ubo_1 {                                          \n"
-    "   vec4 xyz_color;                                                                     \n"
-    "   vec4 x_dt_yz_screen;                                                                \n"
-    "};                                                                                     \n"
-    "layout(location = 0) in vec2 texcoord;                                                 \n"
-    "layout(location = 0) out vec4 target;                                                  \n"
-    "layout(binding = 0) uniform sampler2D curframe;                                        \n"
-    "layout(binding = 1) uniform sampler2D afterimage;                                      \n"
-    "vec4 textureBlurCheap(sampler2D s, vec2 b)                                             \n"
-    "{                                                                                      \n"
-    "   vec2 epsilon = 2.0 / vec2(x_dt_yz_screen.yz);                                       \n"
-    "   vec4 res = vec4(0.0);                                                               \n"
-    "   res += texture(s, b);                                                               \n"
-    "   res += texture(s, b + vec2(epsilon.x, 0.0));                                        \n"
-    "   res += texture(s, b - vec2(epsilon.x, 0.0));                                        \n"
-    "   res += texture(s, b + vec2(0.0, epsilon.y));                                        \n"
-    "   res += texture(s, b - vec2(0.0, epsilon.y));                                        \n"
-    "   return res / 5.0;                                                                   \n"
-    "}                                                                                      \n"
-    "void main(void)                                                                        \n"
-    "{                                                                                      \n"
-    "   vec4 cc = textureBlurCheap(curframe, texcoord) + texture(curframe, texcoord);       \n"
-    "   vec4 ac = textureBlurCheap(afterimage, texcoord) * (1.0 - x_dt_yz_screen.x * 4.0);  \n"
-    "   target = max(cc * 0.5, ac);                                                         \n"
-    "}                                                                                      \n";
-
-/* PROG_GRID fragment shader.
- * Draws a typical oscilloscope graticule */
-static const char *grid_frag_src =
-    "#version 450 core                                                                      \n"
-    "#define NDC_MARGIN " TOSTRING2(NDC_MARGIN) "                                           \n"
-    "layout(binding = 1, std140) uniform __ubo_1 {                                          \n"
-    "   vec4 xyz_color;                                                                     \n"
-    "   vec4 x_dt_yz_screen;                                                                \n"
-    "};                                                                                     \n"
-    "layout(location = 0) in vec2 texcoord;                                                 \n"
-    "layout(location = 0) out vec4 target;                                                  \n"
-    "layout(binding = 0) uniform sampler2D curframe;                                        \n"
-    "void main(void)                                                                        \n"
-    "{                                                                                      \n"
-    "   vec2 tss = x_dt_yz_screen.yz;                                                       \n"
-    "   vec2 lim = tss * 0.5 * NDC_MARGIN;                                                  \n"
-    "   vec2 oss = tss - 2.0 * lim;                                                         \n"
-    "   vec2 cell = oss / 10.0;                                                             \n"
-    "   vec2 grid = gl_FragCoord.xy - lim;                                                  \n"
-    "   target = texture(curframe, texcoord);                                               \n"
-    "   if(grid.x >= 0.0 && grid.y >= 0.0 && grid.x <= oss.x + 1 && grid.y <= oss.y + 1) {  \n"
-    "       if(mod(grid.x, cell.x) < 1.0 || mod(grid.y, cell.y) < 1.0) {                    \n"
-    "           target *= 0.25;                                                             \n"
-    "       }                                                                               \n"
-    "   }                                                                                   \n"
-    "}                                                                                      \n";
 
 static void lvprintf(const char *fmt, va_list va)
 {
@@ -198,21 +97,6 @@ static void *safe_malloc(size_t n)
 static void on_error(int code, const char *message)
 {
     lprintf("glfw: %s", message);
-}
-
-static void on_framebuffer_size(GLFWwindow *window, int width, int height)
-{
-    int i;
-
-    glDeleteTextures(NUM_FBOS, g_fbos_tex);
-    glCreateTextures(GL_TEXTURE_2D, NUM_FBOS, g_fbos_tex);
-
-    for(i = 0; i < NUM_FBOS; i++) {
-        glTextureStorage2D(g_fbos_tex[i], 1, GL_RGB32F, width, height);
-        glTextureParameteri(g_fbos_tex[i], GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTextureParameteri(g_fbos_tex[i], GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glNamedFramebufferTexture(g_fbos_obj[i], GL_COLOR_ATTACHMENT0, g_fbos_tex[i], 0);
-    }
 }
 
 static GLuint make_shader(GLenum stage, const char *source)
@@ -274,41 +158,110 @@ static GLuint make_program(GLuint vert, GLuint frag)
     return program;
 }
 
-static double make_shm(double a, double t, double f, double ts)
+static int pa_callback(const void *input, void *output, unsigned long framerate, const PaStreamCallbackTimeInfo *time_info, PaStreamCallbackFlags flags, void *arg)
 {
-    return a * cos(2 * M_PI * t * f + ts);
+    size_t j;
+    unsigned long i;
+    float *fl_output = output;
+    struct pa_state *state = arg;
+    for(i = 0; i < framerate; i++) {
+        if(state->position >= state->num_samples)
+            return paComplete;
+        for(j = 0; j < state->num_channels; j++)
+            *fl_output++ = state->samples[state->position * state->num_channels + j] * 0.25f;
+        state->position++;
+    }
+
+    return paContinue;
 }
 
-static double make_saw(double a, double t, double f, double ts)
+static void fill_signal_tab(int scr_width)
 {
-    return a * (fmod(t * 2.0 * f + ts, 2.0) - 1.0);
+    int i;
+    size_t j, off;
+    int64_t scratch = (int64_t)g_state.position - (int64_t)g_state.num_samples;
+    size_t num_samples = g_state.num_samples - g_state.position;
+    if(num_samples > g_wave_table_size)
+        num_samples = g_wave_table_size;
+    for(i = 0; i < num_samples; i++) {
+        g_wave_table[i][0] = (float)i / (float)num_samples * 2.0f - 1.0f;
+        g_wave_table[i][1] = 0.0f;
+        off = g_state.position + i;
+        if(off >= num_samples) {
+            for(j = 0; j < g_state.num_channels; j++)
+                g_wave_table[i][1] += g_state.samples[(off - num_samples) * g_state.num_channels + j];
+            g_wave_table[i][1] /= (float)g_state.num_channels;
+        }
+    }
 }
 
-static double make_tri(double a, double t, double f, double ts)
+static void on_key(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
-    return a * asin(cos(2 * M_PI * t * f + ts)) / (0.5 * M_PI);
-}
-
-static double make_signal_X(double curtime, double ts)
-{
-    return make_saw(1.0, curtime, 128.0, 0.0);
-}
-
-static double make_signal_Y(double curtime, double ts)
-{
-    return make_shm(1.0, curtime, 256.0, ts);
+    if(action == GLFW_PRESS && key == GLFW_KEY_SPACE && !Pa_IsStreamActive(g_stream))
+        Pa_StartStream(g_stream);
 }
 
 int main(int argc, char **argv)
 {
-    int i, width, height;
-    double xf, t, pt, dt, ts;
+    drwav wav;
+    PaError pa_err;
+    PaStreamParameters pa_params;
+    GLFWmonitor *monitor;
+    const GLFWvidmode *vidmode;
+    int width, height;
+    double t, pt, dt;
     GLuint vert, frag;
     struct ubo_data ubo;
+    size_t width_mod = 1;
 
-    ubo.xyz_color[0] = g_foreground[0];
-    ubo.xyz_color[1] = g_foreground[1];
-    ubo.xyz_color[2] = g_foreground[2];
+    ubo.xyz_color[0] = 1.0f;
+    ubo.xyz_color[1] = 1.0f;
+    ubo.xyz_color[2] = 1.0f;
+
+    if((pa_err = Pa_Initialize()) != paNoError)
+        goto on_pa_error;
+
+    if(argc < 2) {
+        lprintf("argument required!");
+        return 1;
+    }
+
+    if(!drwav_init_file(&wav, argv[1], NULL)) {
+        lprintf("unable to open or read %s", argv[1]);
+        return 1;
+    }
+
+    g_state.sample_rate = wav.sampleRate;
+    g_state.samples = safe_malloc(wav.totalPCMFrameCount * wav.channels * sizeof(float));
+    g_state.num_samples = drwav_read_pcm_frames_f32(&wav, wav.totalPCMFrameCount, g_state.samples);
+    g_state.num_channels = wav.channels;
+    g_state.position = 0;
+
+    drwav_uninit(&wav);
+
+    if(argc >= 3) {
+        width_mod = (size_t)strtoul(argv[2], NULL, 10);
+        if(!width_mod)
+            width_mod = 1;
+    }
+
+    g_wave_table_size = g_state.sample_rate / width_mod;
+    g_wave_table = safe_malloc(sizeof(vec2f_t) * g_wave_table_size);
+
+    pa_params.device = Pa_GetDefaultOutputDevice();
+    if(pa_params.device == paNoDevice) {
+        lprintf("pa: no output device");
+        return 1;
+    }
+
+    pa_params.channelCount = (int)g_state.num_channels;
+    pa_params.sampleFormat = paFloat32;
+    pa_params.suggestedLatency = Pa_GetDeviceInfo(pa_params.device)->defaultLowOutputLatency;
+    pa_params.hostApiSpecificStreamInfo = NULL;
+
+    pa_err = Pa_OpenStream(&g_stream, NULL, &pa_params, (double)wav.sampleRate, paFramesPerBufferUnspecified, 0, &pa_callback, &g_state);
+    if(pa_err != paNoError)
+        goto on_pa_error;
 
     glfwSetErrorCallback(&on_error);
 
@@ -317,18 +270,20 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
 
-    g_window = glfwCreateWindow(640, 640, "scope", NULL, NULL);
+    monitor = glfwGetPrimaryMonitor();
+    vidmode = glfwGetVideoMode(monitor);
+    g_window = glfwCreateWindow(vidmode->width, vidmode->height, "scope", monitor, NULL);
     if(!g_window) {
         lprintf("glfw: window creation failed");
         return 1;
     }
+
+    glfwSetInputMode(g_window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
 
     glfwMakeContextCurrent(g_window);
     glfwSwapInterval(1);
@@ -338,40 +293,16 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* PROG_BEAM */
-    vert = make_shader(GL_VERTEX_SHADER, beam_vert_src);
-    frag = make_shader(GL_FRAGMENT_SHADER, beam_frag_src);
-    g_progs[PROG_BEAM] = make_program(vert, frag);
-    if(!g_progs[PROG_BEAM]) {
-        lprintf("prog_beam compilation failed");
+    vert = make_shader(GL_VERTEX_SHADER, vert_src);
+    frag = make_shader(GL_FRAGMENT_SHADER, frag_src);
+    g_program = make_program(vert, frag);
+    if(!g_program) {
+        lprintf("program compilation failed");
         return 1;
     }
-
-    /* PROG_POST */
-    vert = make_shader(GL_VERTEX_SHADER, post_grid_vert_src);
-    frag = make_shader(GL_FRAGMENT_SHADER, post_frag_src);
-    g_progs[PROG_POST] = make_program(vert, frag);
-    if(!g_progs[PROG_POST]) {
-        lprintf("prot_post compilation failed");
-        return 1;
-    }
-
-    /* PROG_GRID */
-    vert = make_shader(GL_VERTEX_SHADER, post_grid_vert_src);
-    frag = make_shader(GL_FRAGMENT_SHADER, grid_frag_src);
-    g_progs[PROG_GRID] = make_program(vert, frag);
-    if(!g_progs[PROG_GRID]) {
-        lprintf("prot_grid compilation failed");
-        return 1;
-    }
-
-    glCreateFramebuffers(NUM_FBOS, g_fbos_obj);
-    glfwGetFramebufferSize(g_window, &width, &height);
-    glfwSetFramebufferSizeCallback(g_window, &on_framebuffer_size);
-    on_framebuffer_size(g_window, width, height);
 
     glCreateBuffers(NUM_BUFS, g_bufs);
-    glNamedBufferStorage(g_bufs[BUF_SSBO], sizeof(g_signal), NULL, GL_DYNAMIC_STORAGE_BIT);
+    glNamedBufferStorage(g_bufs[BUF_SSBO], sizeof(vec2f_t) * g_wave_table_size, NULL, GL_DYNAMIC_STORAGE_BIT);
     glNamedBufferStorage(g_bufs[BUF_UNIF], sizeof(ubo), NULL, GL_DYNAMIC_STORAGE_BIT);
 
     /* To draw stuff OpenGL needs a valid VAO
@@ -380,72 +311,59 @@ int main(int argc, char **argv)
      * manually or have them hardcoded. */
     glCreateVertexArrays(1, &g_vao);
 
-    ts = 0.0;
+    glfwSetKeyCallback(g_window, &on_key);
+
     pt = t = glfwGetTime();
     while(!glfwWindowShouldClose(g_window)) {
         t = glfwGetTime();
         dt = t - pt;
         pt = t;
-        ts += dt;
-
-        for(i = 0; i < SIGNAL_TAB_SIZE; i++) {
-            xf = ((double)i / SIGNAL_TAB_SIZE) * dt;
-            g_signal[i][0] = (float)make_signal_X(t + xf, ts);
-            g_signal[i][1] = (float)make_signal_Y(t + xf, ts);
-        }
 
         glfwGetFramebufferSize(g_window, &width, &height);
         glViewport(0, 0, width, height);
+        fill_signal_tab(width);
 
         ubo.x_dt_yz_screen[0] = (float)dt;
         ubo.x_dt_yz_screen[1] = (float)width;
         ubo.x_dt_yz_screen[2] = (float)height;
 
-        glNamedBufferSubData(g_bufs[BUF_SSBO], 0, sizeof(g_signal), g_signal);
+        glNamedBufferSubData(g_bufs[BUF_SSBO], 0, sizeof(vec2f_t) * g_wave_table_size, g_wave_table);
         glNamedBufferSubData(g_bufs[BUF_UNIF], 0, sizeof(ubo), &ubo);
+
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT);
 
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, g_bufs[BUF_SSBO]);
         glBindBufferBase(GL_UNIFORM_BUFFER, 1, g_bufs[BUF_UNIF]);
 
         glBindVertexArray(g_vao);
 
-        /* PROG_BEAM pass */
-        glBindFramebuffer(GL_FRAMEBUFFER, g_fbos_obj[FBO_BEAM]);
-        glClearColor(g_background[0], g_background[1], g_background[2], 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
-        glLineWidth(3.0);
-        glPointSize(3.0);
-        glUseProgram(g_progs[PROG_BEAM]);
-        glDrawArrays(GL_POINTS, 0, 1);
-        glDrawArrays(GL_LINE_STRIP, 0, SIGNAL_TAB_SIZE);
+        glLineWidth(2.0f);
 
-        /* PROG_POST pass */
-        glBindFramebuffer(GL_FRAMEBUFFER, g_fbos_obj[FBO_COPY]);
-        glUseProgram(g_progs[PROG_POST]);
-        glBindTextureUnit(0, g_fbos_tex[FBO_BEAM]);
-        glBindTextureUnit(1, g_fbos_tex[FBO_POST]);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        glBlitNamedFramebuffer(g_fbos_obj[FBO_COPY], g_fbos_obj[FBO_POST], 0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glUseProgram(g_program);
 
-        /* PROG_GRID pass */
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glUseProgram(g_progs[PROG_GRID]);
-        glBindTextureUnit(0, g_fbos_tex[FBO_COPY]);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        glDrawArrays(GL_LINE_STRIP, 0, (GLuint)g_wave_table_size);
 
         glfwSwapBuffers(g_window);
         glfwPollEvents();
     }
 
+normal_quit:
     glDeleteVertexArrays(1, &g_vao);
     glDeleteBuffers(NUM_BUFS, g_bufs);
-    glDeleteFramebuffers(NUM_FBOS, g_fbos_obj);
-    glDeleteTextures(NUM_FBOS, g_fbos_tex);
-    glDeleteProgram(g_progs[PROG_GRID]);
-    glDeleteProgram(g_progs[PROG_POST]);
-    glDeleteProgram(g_progs[PROG_BEAM]);
+    glDeleteProgram(g_program);
     glfwDestroyWindow(g_window);
     glfwTerminate();
+    Pa_CloseStream(g_stream);
+    free(g_wave_table);
+    free(g_state.samples);
+    Pa_Terminate();
 
     return 0;
+
+on_pa_error:
+    /* This is a little hacky but it's just a better
+     * way to handle this rather than copypasting lots of code. */
+    lprintf("PortAudio error: %s", Pa_GetErrorText(pa_err));    
+    goto normal_quit;
 }
